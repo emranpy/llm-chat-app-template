@@ -45,7 +45,7 @@
                 height: 100vh;
                 display: flex;
                 flex-direction: column;
-                overflow: hidden; /* Prevent body scroll, handle inner scroll */
+                overflow: hidden;
             }
 
             /* --- Modern Header --- */
@@ -295,6 +295,12 @@
             #send-button:active {
                 transform: scale(0.95);
             }
+            
+            #send-button:disabled {
+                background: var(--color-avocado-light);
+                cursor: not-allowed;
+                transform: none;
+            }
 
             /* --- Typing Indicator --- */
             .typing-indicator {
@@ -406,56 +412,182 @@
             </div>
         </main>
 
-        <!-- Logic Script -->
+        <!-- Logic Script (Connected to Backend) -->
         <script>
-            // UI Interaction Logic
-            const chatMessages = document.getElementById('chat-messages');
-            const userInput = document.getElementById('user-input');
-            const sendButton = document.getElementById('send-button');
-            const typingIndicator = document.getElementById('typing-indicator');
+            // DOM Elements
+            const chatMessages = document.getElementById("chat-messages");
+            const userInput = document.getElementById("user-input");
+            const sendButton = document.getElementById("send-button");
+            const typingIndicator = document.getElementById("typing-indicator");
+
+            // State
+            let chatHistory = [
+                {
+                    role: "assistant",
+                    content: "Hello! I'm Fineova, your personal skincare assistant. ✨ I can help you build a routine, analyze ingredients, or find the right products for your skin type. What can I help you with today?"
+                }
+            ];
+            let isProcessing = false;
 
             // Auto-resize textarea
-            userInput.addEventListener('input', function() {
-                this.style.height = 'auto';
-                this.style.height = (this.scrollHeight) + 'px';
+            userInput.addEventListener("input", function () {
+                this.style.height = "auto";
+                this.style.height = this.scrollHeight + "px";
             });
 
-            // Handle Send
-            function sendMessage() {
+            // Send on Enter (allow Shift+Enter for new line)
+            userInput.addEventListener("keydown", function (e) {
+                if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    sendMessage();
+                }
+            });
+
+            sendButton.addEventListener("click", sendMessage);
+
+            /**
+             * Main function to send message to backend
+             */
+            async function sendMessage() {
                 const message = userInput.value.trim();
-                if (!message) return;
+                if (message === "" || isProcessing) return;
 
-                // 1. Append User Message
-                appendMessage(message, 'user');
-                userInput.value = '';
-                userInput.style.height = 'auto';
+                // Update UI State
+                isProcessing = true;
+                sendButton.disabled = true;
+                userInput.value = "";
+                userInput.style.height = "auto";
 
-                // 2. Show Typing Indicator
-                typingIndicator.classList.add('visible');
+                // 1. Add User Message to UI
+                appendMessage("user", message);
+                
+                // 2. Add to History
+                chatHistory.push({ role: "user", content: message });
+
+                // 3. Show Typing Indicator
+                typingIndicator.classList.add("visible");
                 scrollToBottom();
 
-                // 3. Simulate AI Response (Replace this with your actual chat.js logic)
-                setTimeout(() => {
-                    typingIndicator.classList.remove('visible');
-                    appendMessage("That's a great question! Based on your skin type, I recommend looking for ingredients like Hyaluronic Acid for hydration. Would you like a specific product recommendation?", 'assistant');
-                }, 1500);
+                try {
+                    // 4. Create placeholder for Assistant Response
+                    // We create the row structure here so we can fill it iteratively
+                    const row = document.createElement("div");
+                    row.classList.add("message-row", "assistant-row");
+                    
+                    const avatar = document.createElement("div");
+                    avatar.classList.add("avatar", "assistant-avatar");
+                    avatar.innerText = "F";
+
+                    const messageDiv = document.createElement("div");
+                    messageDiv.classList.add("message", "assistant-message");
+                    
+                    const textP = document.createElement("p");
+                    messageDiv.appendChild(textP);
+                    
+                    row.appendChild(avatar);
+                    row.appendChild(messageDiv);
+                    chatMessages.appendChild(row);
+
+                    // 5. Send Request to Backend
+                    const response = await fetch("/api/chat", {
+                        method: "POST",
+                        headers: { "Content-Type": "application/json" },
+                        body: JSON.stringify({ messages: chatHistory }),
+                    });
+
+                    if (!response.ok) throw new Error("Network response was not ok");
+                    if (!response.body) throw new Error("Response body is null");
+
+                    // 6. Process Stream
+                    // Hide typing indicator because we are about to show real text
+                    typingIndicator.classList.remove("visible");
+
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = "";
+                    let responseText = "";
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        // Decode chunk and add to buffer
+                        buffer += decoder.decode(value, { stream: true });
+
+                        // Parse SSE events from buffer
+                        const parsed = consumeSseEvents(buffer);
+                        buffer = parsed.buffer; // Keep unprocessed part in buffer
+
+                        for (const data of parsed.events) {
+                            if (data === "[DONE]") break;
+
+                            try {
+                                const jsonData = JSON.parse(data);
+                                let content = "";
+                                
+                                // Handle Workers AI format
+                                if (typeof jsonData.response === "string") {
+                                    content = jsonData.response;
+                                } 
+                                // Handle OpenAI format fallback
+                                else if (jsonData.choices?.[0]?.delta?.content) {
+                                    content = jsonData.choices[0].delta.content;
+                                }
+
+                                if (content) {
+                                    responseText += content;
+                                    textP.textContent = responseText; // Update UI live
+                                    scrollToBottom();
+                                }
+                            } catch (e) {
+                                console.error("Error parsing JSON:", e);
+                            }
+                        }
+                    }
+
+                    // 7. Save final response to history
+                    if (responseText) {
+                        chatHistory.push({ role: "assistant", content: responseText });
+                    }
+
+                } catch (error) {
+                    console.error("Error:", error);
+                    typingIndicator.classList.remove("visible");
+                    appendMessage("assistant", "Sorry, I encountered an error connecting to the AI. Please try again.");
+                } finally {
+                    isProcessing = false;
+                    sendButton.disabled = false;
+                    userInput.focus();
+                }
             }
 
-            function appendMessage(text, sender) {
-                const row = document.createElement('div');
-                row.classList.add('message-row');
-                row.classList.add(sender === 'user' ? 'user-row' : 'assistant-row');
-
-                const avatarClass = sender === 'user' ? 'user-avatar' : 'assistant-avatar';
-                const avatarText = sender === 'user' ? 'U' : 'F'; // U for User, F for Fineova
+            /**
+             * Helper to add static messages (User or Error)
+             */
+            function appendMessage(role, text) {
+                const row = document.createElement("div");
+                row.classList.add("message-row");
                 
-                const messageClass = sender === 'user' ? 'user-message' : 'assistant-message';
+                const avatar = document.createElement("div");
+                const msgDiv = document.createElement("div");
+                
+                msgDiv.classList.add("message");
+                msgDiv.innerHTML = `<p>${text}</p>`;
 
-                row.innerHTML = `
-                    <div class="avatar ${avatarClass}">${avatarText}</div>
-                    <div class="message ${messageClass}"><p>${text}</p></div>
-                `;
+                if (role === "user") {
+                    row.classList.add("user-row");
+                    avatar.classList.add("avatar", "user-avatar");
+                    avatar.innerText = "U";
+                    msgDiv.classList.add("user-message");
+                } else {
+                    row.classList.add("assistant-row");
+                    avatar.classList.add("avatar", "assistant-avatar");
+                    avatar.innerText = "F";
+                    msgDiv.classList.add("assistant-message");
+                }
 
+                row.appendChild(avatar);
+                row.appendChild(msgDiv);
                 chatMessages.appendChild(row);
                 scrollToBottom();
             }
@@ -464,15 +596,31 @@
                 chatMessages.scrollTop = chatMessages.scrollHeight;
             }
 
-            // Event Listeners
-            sendButton.addEventListener('click', sendMessage);
-            
-            userInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    sendMessage();
+            /**
+             * SSE Parsing Helper (From your chat.js)
+             */
+            function consumeSseEvents(buffer) {
+                let normalized = buffer.replace(/\r/g, "");
+                const events = [];
+                let eventEndIndex;
+                
+                while ((eventEndIndex = normalized.indexOf("\n\n")) !== -1) {
+                    const rawEvent = normalized.slice(0, eventEndIndex);
+                    normalized = normalized.slice(eventEndIndex + 2);
+
+                    const lines = rawEvent.split("\n");
+                    const dataLines = [];
+                    for (const line of lines) {
+                        if (line.startsWith("data:")) {
+                            dataLines.push(line.slice("data:".length).trimStart());
+                        }
+                    }
+                    if (dataLines.length > 0) {
+                        events.push(dataLines.join("\n"));
+                    }
                 }
-            });
+                return { events, buffer: normalized };
+            }
         </script>
     </body>
 </html>
